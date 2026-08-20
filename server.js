@@ -4,12 +4,11 @@ const path = require("path");
 const http = require("http");
 const crypto = require("crypto");
 const { Server } = require("socket.io");
-const rateLimit = require("express-rate-limit");
 
 const app = express();
 const server = http.createServer(app);
 
-// Configure Socket.IO with CORS (adjust origin as needed)
+// Socket.IO
 const io = new Server(server, {
   cors: {
     origin: process.env.FRONTEND_URL || "*",
@@ -23,18 +22,12 @@ const users = [];
 const messages = [];
 const sessions = new Map(); // token -> { email, createdAt, expiresAt }
 const onlineUsers = new Map(); // email -> Set<socketId>
+const socketToEmail = new Map(); // socket -> email
 
-// Basic middleware
+// Middleware
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
-
-// Simple rate limiter for auth routes
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // limit each IP to 20 requests per windowMs
-  message: { error: "Too many requests, please try again later." }
-});
 
 // ---------- Helpers ----------
 
@@ -93,7 +86,7 @@ function setSessionCookie(res, token, isProduction = false) {
     "HttpOnly",
     "Path=/",
     "SameSite=Lax",
-    "Max-Age=604800" // 7 days
+    "Max-Age=604800"
   ];
 
   if (isProduction) {
@@ -127,7 +120,6 @@ function clearSessionCookie(res, isProduction = false) {
 function getAuthenticatedUser(req) {
   const session = getSession(req);
   if (!session) return null;
-
   return users.find(user => user.email === session.email) || null;
 }
 
@@ -145,14 +137,7 @@ function emitStatus(email, online) {
   io.emit("status-update", { email, online });
 }
 
-// Map socket -> authenticated email
-const socketToEmail = new Map();
-
-function getAuthenticatedEmailFromSocket(socket) {
-  return socketToEmail.get(socket) || null;
-}
-
-// ---------- Pages ----------
+// ---------- Login page HTML ----------
 
 function loginPage(error = "", email = "") {
   const safeEmail = String(email || "").replace(/"/g, "&quot;");
@@ -257,8 +242,8 @@ app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-// Register (unified, fixed typo)
-app.post("/auth/register", authLimiter, (req, res) => {
+// Register
+app.post("/auth/register", (req, res) => {
   const { email, name, password } = req.body || {};
 
   if (!email || !name || !password) {
@@ -272,7 +257,6 @@ app.post("/auth/register", authLimiter, (req, res) => {
     return res.status(400).send("<h1>Error: Invalid input!</h1>");
   }
 
-  // Basic email format check
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
     return res.status(400).send("<h1>Error: Invalid email format!</h1>");
   }
@@ -301,7 +285,7 @@ app.post("/auth/register", authLimiter, (req, res) => {
   res.redirect("/chat?user=" + encodeURIComponent(cleanEmail));
 });
 
-// Login page (with optional prefill and “already active” warning)
+// Login page
 app.get("/auth/login", (req, res) => {
   const email = String(req.query.user || "").toLowerCase().trim();
   const user = getUser(email);
@@ -325,7 +309,7 @@ app.get("/auth/login", (req, res) => {
 });
 
 // Login POST
-app.post("/auth/login", authLimiter, (req, res) => {
+app.post("/auth/login", (req, res) => {
   const email = String(req.body.email || "").toLowerCase().trim();
   const password = String(req.body.password || "");
 
@@ -344,7 +328,6 @@ app.post("/auth/login", authLimiter, (req, res) => {
     return res.status(401).send(loginPage("Invalid email or password.", email));
   }
 
-  // Invalidate old session for this user (optional: you could allow multiple)
   const oldSession = getSession(req);
   if (oldSession) {
     sessions.delete(oldSession.token);
@@ -375,7 +358,7 @@ app.get("/auth/logout", (req, res) => {
   res.redirect("/");
 });
 
-// Chat page (protected)
+// Chat page
 app.get("/chat", (req, res) => {
   const requestedEmail = String(req.query.user || "").toLowerCase().trim();
   const authenticatedUser = getAuthenticatedUser(req);
@@ -421,7 +404,7 @@ app.get("/api/users", (req, res) => {
   res.json(list);
 });
 
-// API: message history
+// API: history
 app.get("/api/history", (req, res) => {
   const user = String(req.query.user || "").toLowerCase().trim();
   const target = String(req.query.target || "").toLowerCase().trim();
@@ -461,54 +444,28 @@ app.get("/api/history", (req, res) => {
 io.on("connection", socket => {
   let currentEmail = null;
 
-  // Client should send session token once connected
-  socket.on("authenticate-socket", data => {
-    const token = String(data?.token || "").trim();
-    if (!token) {
-      socket.disconnect(true);
-      return;
-    }
-
-    const session = sessions.get(token);
-    if (!session || Date.now() > session.expiresAt) {
-      if (session) sessions.delete(token);
-      socket.disconnect(true);
-      return;
-    }
-
-    const user = getUser(session.email);
-    if (!user) {
-      socket.disconnect(true);
-      return;
-    }
-
-    currentEmail = session.email;
-    socketToEmail.set(socket, currentEmail);
-
-    // Mark as online
-    if (!onlineUsers.has(currentEmail)) {
-      onlineUsers.set(currentEmail, new Set());
-    }
-    onlineUsers.get(currentEmail).add(socket.id);
-
-    emitStatus(currentEmail, true);
-  });
-
+  // Simple register-online from frontend (your existing event)
   socket.on("register-online", email => {
-    // Legacy support; prefer authenticate-socket with token
-    if (!email || !currentEmail) return;
+    if (!email) return;
+
     const cleanEmail = String(email).toLowerCase().trim();
-    if (cleanEmail !== currentEmail) return;
+    const user = getUser(cleanEmail);
+    if (!user) return;
+
+    // Optional: you could check session via cookie, but for simplicity we trust email here
+    currentEmail = cleanEmail;
+    socketToEmail.set(socket, currentEmail);
 
     if (!onlineUsers.has(cleanEmail)) {
       onlineUsers.set(cleanEmail, new Set());
     }
     onlineUsers.get(cleanEmail).add(socket.id);
+
     emitStatus(cleanEmail, true);
   });
 
   socket.on("send-connect-request", data => {
-    const fromEmail = getAuthenticatedEmailFromSocket(socket);
+    const fromEmail = socketToEmail.get(socket);
     if (!fromEmail || !data || !data.targetEmail) return;
 
     const targetEmail = String(data.targetEmail).toLowerCase().trim();
@@ -527,7 +484,7 @@ io.on("connection", socket => {
   });
 
   socket.on("confirm-connection", data => {
-    const fromEmail = getAuthenticatedEmailFromSocket(socket);
+    const fromEmail = socketToEmail.get(socket);
     if (!fromEmail || !data || !data.targetEmail) return;
 
     const targetEmail = String(data.targetEmail).toLowerCase().trim();
@@ -554,7 +511,7 @@ io.on("connection", socket => {
   });
 
   socket.on("send-chat-message", data => {
-    const fromEmail = getAuthenticatedEmailFromSocket(socket);
+    const fromEmail = socketToEmail.get(socket);
     if (!fromEmail || !data || !data.targetEmail || !data.text) return;
 
     const targetEmail = String(data.targetEmail).toLowerCase().trim();
@@ -587,7 +544,7 @@ io.on("connection", socket => {
   });
 
   socket.on("mark-as-read", data => {
-    const fromEmail = getAuthenticatedEmailFromSocket(socket);
+    const fromEmail = socketToEmail.get(socket);
     if (!fromEmail || !data || !data.targetEmail) return;
 
     const targetEmail = String(data.targetEmail).toLowerCase().trim();
