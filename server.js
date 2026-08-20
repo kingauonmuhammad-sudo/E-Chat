@@ -4,6 +4,8 @@ const path = require("path");
 const http = require("http");
 const crypto = require("crypto");
 const { Server } = require("socket.io");
+const fs = require("fs");
+const multer = require("multer");
 
 const app = express();
 const server = http.createServer(app);
@@ -20,14 +22,37 @@ const io = new Server(server, {
 // In-memory stores
 const users = [];
 const messages = [];
-const sessions = new Map(); // token -> { email, createdAt, expiresAt }
+const sessions = new Map();
 const onlineUsers = new Map(); // email -> Set<socketId>
 const socketToEmail = new Map(); // socket -> email
 
+// For video call / class signaling
+const userSockets = new Map(); // email -> socket
+
 // Middleware
-app.use(express.json({ limit: "1mb" }));
-app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+app.use(express.json({ limit: "5mb" }));
+app.use(express.urlencoded({ extended: true, limit: "5mb" }));
 app.use(express.static(path.join(__dirname, "public")));
+
+// Uploads folder
+const uploadsDir = path.join(__dirname, "public", "uploads");
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: uploadsDir,
+  filename: (req, file, cb) => {
+    const unique = crypto.randomBytes(12).toString("hex");
+    const ext = path.extname(file.originalname) || ".bin";
+    cb(null, `${unique}${ext}`);
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 } // 5MB
+});
 
 // ---------- Helpers ----------
 
@@ -38,7 +63,7 @@ function hashPassword(password) {
 function createSession(email) {
   const token = crypto.randomBytes(48).toString("hex");
   const now = Date.now();
-  const expiresAt = now + 7 * 24 * 60 * 60 * 1000; // 7 days
+  const expiresAt = now + 7 * 24 * 60 * 60 * 1000;
 
   sessions.set(token, {
     email,
@@ -88,10 +113,7 @@ function setSessionCookie(res, token, isProduction = false) {
     "SameSite=Lax",
     "Max-Age=604800"
   ];
-
-  if (isProduction) {
-    flags.push("Secure");
-  }
+  if (isProduction) flags.push("Secure");
 
   res.setHeader(
     "Set-Cookie",
@@ -106,10 +128,7 @@ function clearSessionCookie(res, isProduction = false) {
     "SameSite=Lax",
     "Max-Age=0"
   ];
-
-  if (isProduction) {
-    flags.push("Secure");
-  }
+  if (isProduction) flags.push("Secure");
 
   res.setHeader(
     "Set-Cookie",
@@ -137,7 +156,213 @@ function emitStatus(email, online) {
   io.emit("status-update", { email, online });
 }
 
-// ---------- Login page HTML ----------
+// ---------- Routes ----------
+
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "public", "index.html"));
+});
+
+// Register
+app.post("/auth/register", (req, res) => {
+  const { email, name, password } = req.body || {};
+  if (!email || !name || !password) {
+    return res.status(400).send("<h1>Error: All fields are required!</h1>");
+  }
+
+  const cleanEmail = String(email).toLowerCase().trim();
+  const cleanName = String(name).trim();
+
+  if (!cleanEmail || !cleanName || !password) {
+    return res.status(400).send("<h1>Error: Invalid input!</h1>");
+  }
+
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+    return res.status(400).send("<h1>Error: Invalid email format!</h1>");
+  }
+
+  if (password.length < 6) {
+    return res.status(400).send("<h1>Error: Password must be at least 6 characters!</h1>");
+  }
+
+  if (users.some(user => user.email === cleanEmail)) {
+    return res.status(400).send("<h1>Error: Email already exists!</h1>");
+  }
+
+  const newUser = {
+    email: cleanEmail,
+    name: cleanName,
+    password: hashPassword(password),
+    connections: []
+  };
+
+  users.push(newUser);
+  const token = createSession(cleanEmail);
+  const isProd = process.env.NODE_ENV === "production";
+  setSessionCookie(res, token, isProd);
+
+  res.redirect("/chat?user=" + encodeURIComponent(cleanEmail));
+});
+
+// Login page
+app.get("/auth/login", (req, res) => {
+  const email = String(req.query.user || "").toLowerCase().trim();
+  const user = getUser(email);
+
+  if (email && !user) {
+    return res.status(404).send("<h1>User not found</h1>");
+  }
+
+  const authenticatedUser = getAuthenticatedUser(req);
+  if (authenticatedUser && email && authenticatedUser.email === email) {
+    return res.redirect("/chat?user=" + encodeURIComponent(email));
+  }
+
+  const error =
+    email && onlineUsers.has(email)
+      ? "This account is already active on another device. Please sign in to authorize this device."
+      : "";
+
+  res.send(loginPage(error, email));
+});
+
+// Login POST
+app.post("/auth/login", (req, res) => {
+  const email = String(req.body.email || "").toLowerCase().trim();
+  const password = String(req.body.password || "");
+
+  if (!email || !password) {
+    return res.status(400).send("<h1>Email and password are required.</h1>");
+  }
+
+  const user = getUser(email);
+  if (!user) {
+    return res.status(401).send("<h1>Invalid email or password.</h1>");
+  }
+
+  const passwordHash = hashPassword(password);
+  if (user.password !== passwordHash) {
+    return res.status(401).send("<h1>Invalid email or password.</h1>");
+  }
+
+  const oldSession = getSession(req);
+  if (oldSession) sessions.delete(oldSession.token);
+
+  const token = createSession(user.email);
+  const isProd = process.env.NODE_ENV === "production";
+  setSessionCookie(res, token, isProd);
+
+  const redirect =
+    typeof req.body.redirect === "string" && req.body.redirect.startsWith("/chat")
+      ? req.body.redirect
+      : "/chat?user=" + encodeURIComponent(user.email);
+
+  res.redirect(redirect);
+});
+
+// Logout
+app.get("/auth/logout", (req, res) => {
+  const session = getSession(req);
+  if (session) sessions.delete(session.token);
+  const isProd = process.env.NODE_ENV === "production";
+  clearSessionCookie(res, isProd);
+  res.redirect("/");
+});
+
+// Chat page
+app.get("/chat", (req, res) => {
+  const requestedEmail = String(req.query.user || "").toLowerCase().trim();
+  const authenticatedUser = getAuthenticatedUser(req);
+
+  if (!requestedEmail) return res.redirect("/");
+  if (!authenticatedUser) {
+    return res.redirect("/auth/login?user=" + encodeURIComponent(requestedEmail));
+  }
+  if (authenticatedUser.email !== requestedEmail) {
+    return res.status(403).send("<h1>Unauthorized</h1><p>You are not authorized to access this account.</p>");
+  }
+
+  res.sendFile(path.join(__dirname, "public", "chat.html"));
+});
+
+// API: list users
+app.get("/api/users", (req, res) => {
+  const currentUserEmail = String(req.query.user || "").toLowerCase().trim();
+  const authenticatedUser = getAuthenticatedUser(req);
+
+  if (!authenticatedUser || authenticatedUser.email !== currentUserEmail) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const currentUser = getUser(currentUserEmail);
+  if (!currentUser) {
+    return res.status(404).json({ error: "User not found" });
+  }
+
+  const list = users
+    .filter(user => user.email !== currentUserEmail)
+    .map(user => ({
+      email: user.email,
+      name: user.name,
+      isOnline: onlineUsers.has(user.email),
+      isConnected: currentUser.connections.includes(user.email)
+    }));
+
+  res.json(list);
+});
+
+// API: history
+app.get("/api/history", (req, res) => {
+  const user = String(req.query.user || "").toLowerCase().trim();
+  const target = String(req.query.target || "").toLowerCase().trim();
+
+  const authenticatedUser = getAuthenticatedUser(req);
+  if (!authenticatedUser || authenticatedUser.email !== user) {
+    return res.status(401).json({ error: "Unauthorized" });
+  }
+
+  const currentUser = getUser(user);
+  if (!currentUser) {
+    return res.status(404).json({ error: "User not found" });
+  }
+
+  if (!currentUser.connections.includes(target)) {
+    return res.status(403).json({ error: "Users are not connected" });
+  }
+
+  const history = messages.filter(
+    message =>
+      (message.sender === user && message.receiver === target) ||
+      (message.sender === target && message.receiver === user)
+  );
+
+  history.forEach(message => {
+    if (message.receiver === user) message.read = true;
+  });
+
+  res.json(history);
+});
+
+// Upload endpoint (image / video / file)
+app.post("/api/upload", (req, res) => {
+  upload.single("file")(req, res, err => {
+    if (err) {
+      return res.status(400).json({ error: "Upload failed", message: err.message });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const fileUrl = `/uploads/${req.file.filename}`;
+    res.json({
+      url: fileUrl,
+      filename: req.file.originalname,
+      mimetype: req.file.mimetype,
+      size: req.file.size
+    });
+  });
+});
+
+// ---------- Login page HTML (simple) ----------
 
 function loginPage(error = "", email = "") {
   const safeEmail = String(email || "").replace(/"/g, "&quot;");
@@ -214,20 +439,9 @@ button:hover { background: #b45309; }
   <form method="POST" action="/auth/login">
     <input type="hidden" name="redirect" value="/chat?user=${encodeURIComponent(email)}">
     <label>Email</label>
-    <input
-      type="email"
-      name="email"
-      value="${safeEmail}"
-      required
-      autocomplete="email"
-    >
+    <input type="email" name="email" value="${safeEmail}" required autocomplete="email">
     <label>Password</label>
-    <input
-      type="password"
-      name="password"
-      required
-      autocomplete="current-password"
-    >
+    <input type="password" name="password" required autocomplete="current-password">
     <button type="submit">Login</button>
   </form>
 </div>
@@ -236,225 +450,20 @@ button:hover { background: #b45309; }
 `;
 }
 
-// ---------- Routes ----------
-
-app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
-});
-
-// Register
-app.post("/auth/register", (req, res) => {
-  const { email, name, password } = req.body || {};
-
-  if (!email || !name || !password) {
-    return res.status(400).send("<h1>Error: All fields are required!</h1>");
-  }
-
-  const cleanEmail = String(email).toLowerCase().trim();
-  const cleanName = String(name).trim();
-
-  if (!cleanEmail || !cleanName || !password) {
-    return res.status(400).send("<h1>Error: Invalid input!</h1>");
-  }
-
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
-    return res.status(400).send("<h1>Error: Invalid email format!</h1>");
-  }
-
-  if (password.length < 6) {
-    return res.status(400).send("<h1>Error: Password must be at least 6 characters!</h1>");
-  }
-
-  if (users.some(user => user.email === cleanEmail)) {
-    return res.status(400).send("<h1>Error: Email already exists!</h1>");
-  }
-
-  const newUser = {
-    email: cleanEmail,
-    name: cleanName,
-    password: hashPassword(password),
-    connections: []
-  };
-
-  users.push(newUser);
-
-  const token = createSession(cleanEmail);
-  const isProd = process.env.NODE_ENV === "production";
-  setSessionCookie(res, token, isProd);
-
-  res.redirect("/chat?user=" + encodeURIComponent(cleanEmail));
-});
-
-// Login page
-app.get("/auth/login", (req, res) => {
-  const email = String(req.query.user || "").toLowerCase().trim();
-  const user = getUser(email);
-
-  if (email && !user) {
-    return res.status(404).send("<h1>User not found</h1>");
-  }
-
-  const authenticatedUser = getAuthenticatedUser(req);
-
-  if (authenticatedUser && email && authenticatedUser.email === email) {
-    return res.redirect("/chat?user=" + encodeURIComponent(email));
-  }
-
-  const error =
-    email && onlineUsers.has(email)
-      ? "This account is already active on another device. Please sign in to authorize this device."
-      : "";
-
-  res.send(loginPage(error, email));
-});
-
-// Login POST
-app.post("/auth/login", (req, res) => {
-  const email = String(req.body.email || "").toLowerCase().trim();
-  const password = String(req.body.password || "");
-
-  if (!email || !password) {
-    return res.status(400).send(loginPage("Email and password are required.", email));
-  }
-
-  const user = getUser(email);
-
-  if (!user) {
-    return res.status(401).send(loginPage("Invalid email or password.", email));
-  }
-
-  const passwordHash = hashPassword(password);
-  if (user.password !== passwordHash) {
-    return res.status(401).send(loginPage("Invalid email or password.", email));
-  }
-
-  const oldSession = getSession(req);
-  if (oldSession) {
-    sessions.delete(oldSession.token);
-  }
-
-  const token = createSession(user.email);
-  const isProd = process.env.NODE_ENV === "production";
-  setSessionCookie(res, token, isProd);
-
-  const redirect =
-    typeof req.body.redirect === "string" && req.body.redirect.startsWith("/chat")
-      ? req.body.redirect
-      : "/chat?user=" + encodeURIComponent(user.email);
-
-  res.redirect(redirect);
-});
-
-// Logout
-app.get("/auth/logout", (req, res) => {
-  const session = getSession(req);
-  if (session) {
-    sessions.delete(session.token);
-  }
-
-  const isProd = process.env.NODE_ENV === "production";
-  clearSessionCookie(res, isProd);
-
-  res.redirect("/");
-});
-
-// Chat page
-app.get("/chat", (req, res) => {
-  const requestedEmail = String(req.query.user || "").toLowerCase().trim();
-  const authenticatedUser = getAuthenticatedUser(req);
-
-  if (!requestedEmail) {
-    return res.redirect("/");
-  }
-
-  if (!authenticatedUser) {
-    return res.redirect("/auth/login?user=" + encodeURIComponent(requestedEmail));
-  }
-
-  if (authenticatedUser.email !== requestedEmail) {
-    return res.status(403).send("<h1>Unauthorized</h1><p>You are not authorized to access this account.</p>");
-  }
-
-  res.sendFile(path.join(__dirname, "public", "chat.html"));
-});
-
-// API: list users
-app.get("/api/users", (req, res) => {
-  const currentUserEmail = String(req.query.user || "").toLowerCase().trim();
-  const authenticatedUser = getAuthenticatedUser(req);
-
-  if (!authenticatedUser || authenticatedUser.email !== currentUserEmail) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-
-  const currentUser = getUser(currentUserEmail);
-  if (!currentUser) {
-    return res.status(404).json({ error: "User not found" });
-  }
-
-  const list = users
-    .filter(user => user.email !== currentUserEmail)
-    .map(user => ({
-      email: user.email,
-      name: user.name,
-      isOnline: onlineUsers.has(user.email),
-      isConnected: currentUser.connections.includes(user.email)
-    }));
-
-  res.json(list);
-});
-
-// API: history
-app.get("/api/history", (req, res) => {
-  const user = String(req.query.user || "").toLowerCase().trim();
-  const target = String(req.query.target || "").toLowerCase().trim();
-
-  const authenticatedUser = getAuthenticatedUser(req);
-
-  if (!authenticatedUser || authenticatedUser.email !== user) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
-
-  const currentUser = getUser(user);
-  if (!currentUser) {
-    return res.status(404).json({ error: "User not found" });
-  }
-
-  if (!currentUser.connections.includes(target)) {
-    return res.status(403).json({ error: "Users are not connected" });
-  }
-
-  const history = messages.filter(
-    message =>
-      (message.sender === user && message.receiver === target) ||
-      (message.sender === target && message.receiver === user)
-  );
-
-  history.forEach(message => {
-    if (message.receiver === user) {
-      message.read = true;
-    }
-  });
-
-  res.json(history);
-});
-
 // ---------- Socket.IO ----------
 
 io.on("connection", socket => {
   let currentEmail = null;
 
-  // Simple register-online from frontend (your existing event)
   socket.on("register-online", email => {
     if (!email) return;
-
     const cleanEmail = String(email).toLowerCase().trim();
     const user = getUser(cleanEmail);
     if (!user) return;
 
-    // Optional: you could check session via cookie, but for simplicity we trust email here
     currentEmail = cleanEmail;
     socketToEmail.set(socket, currentEmail);
+    userSockets.set(currentEmail, socket);
 
     if (!onlineUsers.has(cleanEmail)) {
       onlineUsers.set(cleanEmail, new Set());
@@ -510,6 +519,7 @@ io.on("connection", socket => {
     socket.emit("connection-established");
   });
 
+  // Text message
   socket.on("send-chat-message", data => {
     const fromEmail = socketToEmail.get(socket);
     if (!fromEmail || !data || !data.targetEmail || !data.text) return;
@@ -521,6 +531,7 @@ io.on("connection", socket => {
     if (!areConnected(fromEmail, targetEmail)) return;
 
     const msgObject = {
+      type: "text",
       sender: fromEmail,
       receiver: targetEmail,
       text,
@@ -541,6 +552,106 @@ io.on("connection", socket => {
     }
 
     socket.emit("message-sent-confirmation", msgObject);
+  });
+
+  // File / image / video message (metadata only; file already uploaded via /api/upload)
+  socket.on("send-file-message", data => {
+    const fromEmail = socketToEmail.get(socket);
+    if (!fromEmail || !data || !data.targetEmail || !data.fileUrl) return;
+
+    const targetEmail = String(data.targetEmail).toLowerCase().trim();
+    if (!areConnected(fromEmail, targetEmail)) return;
+
+    const msgObject = {
+      type: data.fileType || "file", // "image" | "video" | "file"
+      sender: fromEmail,
+      receiver: targetEmail,
+      fileUrl: data.fileUrl,
+      filename: data.filename || "file",
+      mimetype: data.mimetype || "application/octet-stream",
+      timestamp: new Date().toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit"
+      }),
+      read: false
+    };
+
+    messages.push(msgObject);
+
+    const targetSockets = onlineUsers.get(targetEmail);
+    if (targetSockets) {
+      targetSockets.forEach(socketId => {
+        io.to(socketId).emit("receive-chat-message", msgObject);
+      });
+    }
+
+    socket.emit("message-sent-confirmation", msgObject);
+  });
+
+  // Class signaling
+  socket.on("start-class", data => {
+    const fromEmail = socketToEmail.get(socket);
+    if (!fromEmail || !data || !data.targetEmail) return;
+    const targetEmail = String(data.targetEmail).toLowerCase().trim();
+
+    const targetSocket = userSockets.get(targetEmail);
+    if (!targetSocket) return;
+
+    targetSocket.emit("class-started", { by: fromEmail });
+  });
+
+  socket.on("end-class", data => {
+    const fromEmail = socketToEmail.get(socket);
+    if (!fromEmail || !data || !data.targetEmail) return;
+    const targetEmail = String(data.targetEmail).toLowerCase().trim();
+
+    const targetSocket = userSockets.get(targetEmail);
+    if (!targetSocket) return;
+
+    targetSocket.emit("class-ended", { by: fromEmail });
+  });
+
+  // Video call signaling
+  socket.on("call-offer", data => {
+    const fromEmail = socketToEmail.get(socket);
+    if (!fromEmail || !data || !data.targetEmail) return;
+    const targetEmail = String(data.targetEmail).toLowerCase().trim();
+
+    const targetSocket = userSockets.get(targetEmail);
+    if (!targetSocket) return;
+
+    targetSocket.emit("call-offer", {
+      from: fromEmail,
+      offer: data.offer
+    });
+  });
+
+  socket.on("call-answer", data => {
+    const fromEmail = socketToEmail.get(socket);
+    if (!fromEmail || !data || !data.targetEmail) return;
+    const targetEmail = String(data.targetEmail).toLowerCase().trim();
+
+    const targetSocket = userSockets.get(targetEmail);
+    if (!targetSocket) return;
+
+    targetSocket.emit("call-answer", {
+      from: fromEmail,
+      answer: data.answer
+    });
+  });
+
+  socket.on("ice-candidate", data => {
+    const fromEmail = socketToEmail.get(socket);
+    if (!fromEmail || !data || !data.targetEmail) return;
+    const targetEmail = String(data.targetEmail).toLowerCase().trim();
+
+    const targetSocket = userSockets.get(targetEmail);
+    if (!targetSocket) return;
+
+    targetSocket.emit("ice-candidate", {
+      from: fromEmail,
+      candidate: data.candidate
+    });
   });
 
   socket.on("mark-as-read", data => {
@@ -571,6 +682,7 @@ io.on("connection", socket => {
     const sockets = onlineUsers.get(email);
     if (!sockets) {
       socketToEmail.delete(socket);
+      userSockets.delete(email);
       return;
     }
 
@@ -582,13 +694,13 @@ io.on("connection", socket => {
     }
 
     socketToEmail.delete(socket);
+    userSockets.delete(email);
   });
 });
 
 // ---------- Start server ----------
 
 const PORT = process.env.PORT || 3000;
-
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
