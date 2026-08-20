@@ -1,72 +1,233 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>E-CHat</title>
-    <script src="/socket.io/socket.io.js"></script>
-    <script defer src="./app.js"></script>
-    <style>
-        body {
-            width: 100%;
-            min-height: 100vh;
-            box-sizing: border-box;
-            background-color: #ffffff;
-            background-image:
-                linear-gradient(45deg, #efefef 25%, transparent 25%, transparent 75%, #efefef 75%, #efefef 100%),
-                linear-gradient(45deg, #efefef 25%, white 25%, white 75%, #efefef 75%, #efefef 100%);
-            background-position: 0 0, 10px 10px;
-            background-size: 20px 20px;
-            background-clip: border-box;
-            background-repeat: repeat;
-            background-attachment: scroll;
-        }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>E-Chat – Create Account</title>
+  <style>
+    :root {
+      --bg: #fef3c7;
+      --bg-soft: #fffbeb;
+      --panel: #ffffff;
+      --primary: #f59e0b;
+      --primary-dark: #d97706;
+      --primary-darker: #b45309;
+      --text: #451a03;
+      --text-soft: #78350f;
+      --text-muted: #92400e;
+      --border: #fde68a;
+      --border-soft: #fcd34d;
+      --shadow: 0 10px 30px rgba(120, 53, 15, 0.12);
+      --shadow-soft: 0 6px 18px rgba(120, 53, 15, 0.08);
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      font-family: ui-sans, system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial, sans-serif;
+    }
+
+    body {
+      width: 100%;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: radial-gradient(120deg, #fff7ed, #fef3c7);
+      color: var(--text);
+      padding: 1.2rem;
+    }
+
+    .card {
+      width: 100%;
+      max-width: 420px;
+      background: linear-gradient(180deg, #fffbeb, #fff7ed);
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 2rem 1.6rem 2.2rem;
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .card::before {
+      content: "";
+      position: absolute;
+      inset: -2px;
+      border-radius: 20px;
+      padding: 2px;
+      background: linear-gradient(135deg, rgba(245, 158, 11, 0.35), rgba(251, 191, 36, 0.15));
+      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      -webkit-mask-composite: xor;
+      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      mask-composite: exclude;
+      pointer-events: none;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 1.4rem;
+    }
+
+    .title {
+      font-size: 1.6rem;
+      font-weight: 800;
+      color: var(--text-muted);
+      letter-spacing: 0.2px;
+      margin-bottom: 0.35rem;
+    }
+
+    .subtitle {
+      font-size: 0.9rem;
+      color: var(--text-soft);
+    }
+
+    .form-group {
+      margin-bottom: 1.1rem;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 0.45rem;
+      font-size: 0.85rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      letter-spacing: 0.2px;
+    }
+
+    input {
+      width: 100%;
+      padding: 0.8rem 0.95rem;
+      border: 1px solid var(--border-soft);
+      border-radius: 12px;
+      background: var(--panel);
+      color: var(--text);
+      font-size: 0.97rem;
+      outline: none;
+      transition: border-color 0.12s ease, box-shadow 0.12s ease, transform 0.08s ease;
+    }
+
+    input:focus {
+      border-color: var(--primary);
+      box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12);
+      transform: translateY(-1px);
+    }
+
+    .hint {
+      font-size: 0.75rem;
+      color: var(--text-soft);
+      margin-top: 0.35rem;
+    }
+
+    .submit-btn {
+      width: 100%;
+      margin-top: 0.6rem;
+      padding: 0.85rem;
+      background: linear-gradient(90deg, var(--primary-dark), #f59e0b);
+      color: white;
+      border: none;
+      border-radius: 12px;
+      font-size: 0.97rem;
+      font-weight: 800;
+      cursor: pointer;
+      transition: filter 0.12s ease, transform 0.08s ease, box-shadow 0.12s ease;
+      box-shadow: 0 6px 18px rgba(217, 119, 6, 0.35);
+    }
+
+    .submit-btn:hover {
+      filter: brightness(1.05);
+      transform: translateY(-1px);
+      box-shadow: 0 8px 22px rgba(217, 119, 6, 0.4);
+    }
+
+    .submit-btn:active {
+      transform: translateY(0);
+    }
+
+    .footer {
+      margin-top: 1.2rem;
+      text-align: center;
+      font-size: 0.88rem;
+      color: var(--text-soft);
+    }
+
+    .footer a {
+      color: var(--primary-darker);
+      font-weight: 700;
+      text-decoration: none;
+      transition: color 0.12s ease;
+    }
+
+    .footer a:hover {
+      color: var(--primary);
+    }
+
+    @media (max-width: 480px) {
+      .card {
+        padding: 1.6rem 1.1rem 1.8rem;
+      }
+
+      .title {
+        font-size: 1.4rem;
+      }
+    }
+  </style>
 </head>
-
 <body>
-    <form action="/auth/regestor" method="POST"
-        style="background-color: #fffbeb; max-width: 400px; margin: 2rem auto; padding: 2.5rem; border-radius: 16px; border: 1px solid #fde68a; box-shadow: 0 4px 6px -1px rgba(251, 191, 36, 0.1), 0 2px 4px -1px rgba(251, 191, 36, 0.06); font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
-        <h2 style="margin: 0 0 1.5rem 0; color: #78350f; font-size: 1.75rem; font-weight: 700; text-align: center;">
-            Create Account</h2>
+  <div class="card">
+    <div class="header">
+      <div class="title">Create Account</div>
+      <div class="subtitle">Join E‑Chat and start messaging securely.</div>
+    </div>
 
-        <div style="margin-bottom: 1.25rem;">
-            <label for="name"
-                style="display: block; margin-bottom: 0.5rem; color: #92400e; font-size: 0.875rem; font-weight: 600;">Full
-                Name</label>
-            <input type="text" id="name" name="name" required placeholder="John Doe"
-                style="width: 100%; padding: 0.75rem; border: 1px solid #fcd34d; border-radius: 8px; background-color: #ffffff; color: #451a03; font-size: 1rem; box-sizing: border-box; outline: none; transition: border-color 0.2s;"
-                onfocus="this.style.borderColor='#d97706'; this.style.boxShadow='0 0 0 3px rgba(217, 119, 6, 0.15)'"
-                onblur="this.style.borderColor='#fcd34d'; this.style.boxShadow='none'">
-        </div>
+    <form action="/auth/register" method="POST">
+      <div class="form-group">
+        <label for="name">Full Name</label>
+        <input
+          type="text"
+          id="name"
+          name="name"
+          required
+          placeholder="John Doe"
+          autocomplete="name"
+        />
+        <div class="hint">Use your real name so friends can recognize you.</div>
+      </div>
 
-        <div style="margin-bottom: 1.25rem;">
-            <label for="email"
-                style="display: block; margin-bottom: 0.5rem; color: #92400e; font-size: 0.875rem; font-weight: 600;">Email
-                Address</label>
-            <input type="email" id="email" name="email" required placeholder="you@example.com"
-                style="width: 100%; padding: 0.75rem; border: 1px solid #fcd34d; border-radius: 8px; background-color: #ffffff; color: #451a03; font-size: 1rem; box-sizing: border-box; outline: none; transition: border-color 0.2s;"
-                onfocus="this.style.borderColor='#d97706'; this.style.boxShadow='0 0 0 3px rgba(217, 119, 6, 0.15)'"
-                onblur="this.style.borderColor='#fcd34d'; this.style.boxShadow='none'">
-        </div>
+      <div class="form-group">
+        <label for="email">Email Address</label>
+        <input
+          type="email"
+          id="email"
+          name="email"
+          required
+          placeholder="you@example.com"
+          autocomplete="email"
+        />
+      </div>
 
-        <div style="margin-bottom: 2rem;">
-            <label for="password"
-                style="display: block; margin-bottom: 0.5rem; color: #92400e; font-size: 0.875rem; font-weight: 600;">Password</label>
-            <input type="password" id="password" name="password" required placeholder="••••••••"
-                style="width: 100%; padding: 0.75rem; border: 1px solid #fcd34d; border-radius: 8px; background-color: #ffffff; color: #451a03; font-size: 1rem; box-sizing: border-box; outline: none; transition: border-color 0.2s;"
-                onfocus="this.style.borderColor='#d97706'; this.style.boxShadow='0 0 0 3px rgba(217, 119, 6, 0.15)'"
-                onblur="this.style.borderColor='#fcd34d'; this.style.boxShadow='none'">
-        </div>
+      <div class="form-group">
+        <label for="password">Password</label>
+        <input
+          type="password"
+          id="password"
+          name="password"
+          required
+          placeholder="••••••••"
+          minlength="6"
+          autocomplete="new-password"
+        />
+        <div class="hint">At least 6 characters. Keep it secret.</div>
+      </div>
 
-        <button type="submit"
-            style="width: 100%; padding: 0.85rem; background-color: #d97706; color: #ffffff; border: none; border-radius: 8px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background-color 0.2s; box-shadow: 0 2px 4px rgba(217, 119, 6, 0.2);"
-            onmouseover="this.style.backgroundColor='#b45309'" onmouseout="this.style.backgroundColor='#d97706'">
-            Sign Up
-        </button>
+      <button type="submit" class="submit-btn">Sign Up</button>
     </form>
 
+    <div class="footer">
+      Already have an account?
+      <a href="/auth/login">Sign in</a>
+    </div>
+  </div>
 </body>
-
 </html>
